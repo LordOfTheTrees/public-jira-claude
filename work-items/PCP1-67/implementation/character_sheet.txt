@@ -1,0 +1,5 @@
+Name: Dimensional Mystic
+Class: Psychic 20
+Alignment: N
+Ability Scores: STR 10, DEX 14, CON 12, INT 18, WIS 12, CHA 14
+[Full character sheet details...]

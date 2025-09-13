@@ -1,0 +1,155 @@
+name: Jira Claude Automation
+
+on:
+  repository_dispatch:
+    types: [jira-webhook]
+  workflow_dispatch:
+    inputs:
+      test_issue_key:
+        description: 'Test Issue Key'
+        required: false
+        default: 'TEST-001'
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  JIRA_URL: ${{ secrets.JIRA_URL }}
+  JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+  JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+  CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+
+jobs:
+  process-jira-event:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: jira-automation-${{ github.event.client_payload.issue.key || 'manual' }}
+      cancel-in-progress: false
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PERSONAL_FINE_TOKEN }}
+        
+    - name: Setup Node.js Environment
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install Dependencies
+      run: |
+        npm install @anthropic-ai/sdk
+        
+    - name: Validate Environment
+      run: |
+        node -e "
+        const required = ['JIRA_URL', 'JIRA_EMAIL', 'JIRA_API_TOKEN', 'CLAUDE_API_KEY'];
+        const missing = required.filter(key => !process.env[key]);
+        if (missing.length) {
+          console.error('Missing environment variables:', missing.join(', '));
+          process.exit(1);
+        }
+        console.log('All environment variables present');
+        "
+        
+    - name: Process Jira Webhook
+      id: process
+      run: |
+        node -e "
+        const JiraWebhookProcessor = require('./scripts/process-jira-webhook.js');
+        async function main() {
+          try {
+            const processor = new JiraWebhookProcessor();
+            
+            let webhookPayload;
+            
+            if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch') {
+              // Manual test trigger
+              const inputs = JSON.parse(process.env.GITHUB_EVENT_INPUTS || '{}');
+              webhookPayload = {
+                webhookEvent: 'manual_trigger',
+                issue: {
+                  key: inputs.test_issue_key || 'TEST-001',
+                  fields: {
+                    summary: 'Manual Test Trigger',
+                    description: 'Manual test of Claude automation system',
+                    issuetype: { name: 'Story' },
+                    status: { name: 'Open' },
+                    project: { name: 'Test Project' }
+                  }
+                }
+              };
+            } else {
+              // Real webhook from Jira
+              webhookPayload = JSON.parse(process.env.GITHUB_EVENT_CLIENT_PAYLOAD);
+            }
+            
+            console.log('Processing webhook for issue:', webhookPayload.issue?.key);
+            
+            const result = await processor.processWebhook(webhookPayload);
+            
+            console.log('Webhook processing complete:');
+            console.log(JSON.stringify(result, null, 2));
+            
+            // Set outputs for subsequent steps
+            const fs = require('fs');
+            const outputs = [
+              \`action=\${result.action}\`,
+              \`issue-key=\${webhookPayload.issue.key}\`,
+              \`success=true\`
+            ];
+            fs.writeFileSync(process.env.GITHUB_OUTPUT, outputs.join('\\n') + '\\n', { flag: 'a' });
+            
+          } catch (error) {
+            console.error('Webhook processing failed:', error.message);
+            console.error(error.stack);
+            
+            // Set error output
+            const fs = require('fs');
+            fs.writeFileSync(process.env.GITHUB_OUTPUT, 'success=false\\n', { flag: 'a' });
+            
+            process.exit(1);
+          }
+        }
+        
+        main();
+        "
+      env:
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_EVENT_INPUTS: ${{ toJson(github.event.inputs) }}
+        GITHUB_EVENT_CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        
+    - name: Commit Generated Artifacts
+      if: steps.process.outputs.success == 'true' && steps.process.outputs.action != 'ignored'
+      run: |
+        # Configure git
+        git config --local user.email "claude-automation@github.com"
+        git config --local user.name "Claude Automation"
+        
+        # Check if there are any changes to commit
+        if git diff --quiet && git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        
+        # Add and commit changes
+        git add work-items/
+        git commit -m "🤖 Claude automation: ${{ steps.process.outputs.action }} for ${{ steps.process.outputs.issue-key }}" || echo "Nothing to commit"
+        git push
+        
+    - name: Workflow Summary
+      if: always()
+      run: |
+        echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
+        echo "**Issue:** ${{ steps.process.outputs.issue-key }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Action:** ${{ steps.process.outputs.action }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Success:** ${{ steps.process.outputs.success }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.process.outputs.success }}" = "true" ]; then
+          echo "✅ Workflow completed successfully" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Workflow failed" >> $GITHUB_STEP_SUMMARY
+        fi
